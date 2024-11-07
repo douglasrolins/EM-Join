@@ -1,0 +1,6 @@
+datasets
+faiss-gpu
+sentence-transformers
+sumy
+spacy
+nltk
