@@ -1075,10 +1075,7 @@ log.append('---- Informações da geração do modelo ----')
 import sys, os, subprocess
 import argparse
 
-if 'COLAB_GPU' in os.environ:
-  base_path = '/content/EM-Join/datasets/'
-else:
-  base_path = bpath
+base_path = os.getcwd() + '/datasets/'
 
 # Criação do parser de argumentos
 parser = argparse.ArgumentParser(description='Configurações de Treinamento e Processamento')
