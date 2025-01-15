@@ -524,6 +524,73 @@ def join_tables(vetoresA,vetoresB,dfIdsA,dfIdsB,tipo_indice,threshold):
 
   return resultados,timeIndex,timeJoin
 
+# Função de junção em duas tabelas (somente em amostra dos dado rotulado)
+def join_tables_sample(vetoresA,vetoresB,dfIdsA,dfIdsB,tipo_indice,threshold,sample,dfTest):
+
+  # Gerar a amostra de dfTest com base no parâmetro sample
+  dfTest_sample = dfTest.sample(frac=sample, random_state=42)  # Random state para reprodutibilidade
+
+  # Filtrar os IDs de vetoresA e vetoresB com base na amostra gerada
+  ids_ltable = set(dfTest_sample['ltable_id'])
+  ids_rtable = set(dfTest_sample['rtable_id'])
+
+  # Criar novos vetoresA e vetoresB contendo apenas os IDs da amostra
+  maskA = [idx in ids_ltable for idx in dfIdsA['id']]
+  maskB = [idx in ids_rtable for idx in dfIdsB['id']]
+
+  vetoresA = vetoresA[maskA]
+  vetoresB = vetoresB[maskB]
+  dfIdsA = [idx for idx in dfIdsA['id'] if idx in ids_ltable]
+  dfIdsB = [idx for idx in dfIdsB['id'] if idx in ids_rtable]
+  dfIdsA = pd.DataFrame(dfIdsA, columns=['id'])
+  dfIdsB = pd.DataFrame(dfIdsB, columns=['id'])
+
+
+  if len(vetoresA) > len(vetoresB):
+    invert = True
+    vetoresIndexados = vetoresA
+    idsIndex = dfIdsA
+    vetoresBusca = vetoresB
+    idsBusca = dfIdsB
+  else:
+    invert = False
+    vetoresIndexados = vetoresB
+    idsIndex = dfIdsB
+    vetoresBusca = vetoresA
+    idsBusca = dfIdsA
+
+  start = time.time()
+
+  d = vetoresIndexados.shape[1]
+
+  if tipo_indice == 'IndexFlatIP':
+    indice = faiss.IndexFlatIP(d)
+  if tipo_indice == 'HNSW':
+    #parameters
+    M = 64
+    efC = 32
+    efS = 32
+    indice = faiss.IndexHNSWFlat(d,M,faiss.METRIC_INNER_PRODUCT)
+
+    indice.hnsw.efConstruction = efC
+    indice.hnsw.efSearch = efS
+
+  indice.add(vetoresIndexados)
+
+  end = time.time()
+
+  timeIndex = end-start
+
+  start = time.time()
+  if tipo_indice =='IndexFlatIP':
+    resultados = search_IndexFlatIP(vetoresBusca,indice,idsBusca,idsIndex,invert,threshold)
+  elif tipo_indice == 'HNSW':
+    resultados = search_HNSW(vetoresBusca,indice,idsBusca,idsIndex,invert,threshold)
+  end = time.time()
+  timeJoin = end-start
+
+  return resultados,timeIndex,timeJoin
+
 def search_IndexFlatIP(vetoresBusca,indice,idsBusca,idsIndex,invert,threshold):
   resultados = []
   i = 0
@@ -559,12 +626,18 @@ def search_HNSW(vetoresBusca,indice,idsBusca,idsIndex,invert,threshold):
   i = 0
   for vetor in vetoresBusca:
     vetor_consulta = vetor.reshape(1,-1).astype(np.float32)
-    topk = 10 # k inicial
+    # heuristica para k inicial
+    #topk = 10 # k inicial # version 1
+    topk = int(round(32 + ((1 - threshold) * 32))) # version 2
     D, I = indice.search(vetor_consulta,k = topk)
     if len(D) != 0:
       if D.reshape(-1,1)[0] >= threshold:
         while D.reshape(-1,1)[-1] >= threshold:
-          topk = 2 * topk
+          # heuristica para incremento do k
+          #topk = 2 * topk # version 1
+          #topk += int(round(((1 - threshold) * topk) / (1 - D.reshape(-1,1)[-1]))) # version 2
+          topk += int(round(((1 - threshold) * topk) / (1 - D.reshape(-1)[-1].item())))
+
           D, I = indice.search(vetor_consulta,k = topk)
         for result,prod in zip(I.reshape(-1,1),D.reshape(-1,1)):
           if prod >= threshold:
@@ -578,12 +651,18 @@ def search_auto_HNSW(vetores,dfIds,indice,threshold):
   i = 0
   for vetor in vetores:
     vetor_consulta = vetor.reshape(1,-1).astype(np.float32)
-    topk = 10 # k inicial
+    # heuristica para k inicial
+    #topk = 10 # k inicial # version 1
+    topk = int(round(32 + ((1 - threshold) * 32))) # version 2
     D, I = indice.search(vetor_consulta,k = topk)
     if len(D) != 0:
       if D.reshape(-1,1)[0] >= threshold:
         while D.reshape(-1,1)[-1] >= threshold:
-          topk = 2 * topk
+          # heuristica para incremento do k
+          #topk = 2 * topk # version 1
+          #topk += int(round(((1 - threshold) * topk) / (1 - D.reshape(-1,1)[-1]))) # version 2
+          topk += int(round(((1 - threshold) * topk) / (1 - D.reshape(-1)[-1].item())))
+
           D, I = indice.search(vetor_consulta,k = topk)
         for result,prod in zip(I.reshape(-1,1),D.reshape(-1,1)):
           if prod >= threshold and result > i: # não incluir o vetor corrente no resultado e vetores abaixo do ths
@@ -592,13 +671,19 @@ def search_auto_HNSW(vetores,dfIds,indice,threshold):
   return resultados
 
 # Função para calcular similaridade somente nos pares rotulados (tableA->tableB)
-def join_test_two_tables(dfTest,vetoresA,vetoresB,dfIdsA,dfIdsB,threshold):
+def join_test_two_tables(dfTest,vetoresA,vetoresB,dfIdsA,dfIdsB,threshold,sample):
   start = time.time()
   resultados = []
+
+  if sample == 1:
+    dfTest_sample = dfTest
+  else:
+    dfTest_sample = dfTest.sample(frac=sample, random_state=42)
+
   # Fazer loop para passar por todos os pares no dfTest
-  for d in dfTest.index:
-    idLeft = dfTest['ltable_id'][d]
-    idRight = dfTest['rtable_id'][d]
+  for d in dfTest_sample.index:
+    idLeft = dfTest_sample['ltable_id'][d]
+    idRight = dfTest_sample['rtable_id'][d]
 
     # Pegar posição do ID de dfTest no dfIds
     if dfIdsA.iloc[0]['id'] != 0 and dfIdsA.iloc[(len(dfIdsA)-1)]['id'] != len(dfIdsA)-1:
@@ -1124,10 +1209,14 @@ parser.add_argument('--load_save_vectors', action='store_true', help='Carregar v
 
 # Parâmetros para a etapa de junção
 parser.add_argument('--perform_join', action='store_true', help='Realizar junção de registros')
+parser.add_argument('--threshold', type=float, default=0.6, help='Valor de threshold definido manualmente ou threshold inicial para o auto-threshold')
 parser.add_argument('--auto_threshold', action='store_true', help='Definir limite automaticamente')
-parser.add_argument('--threshold', type=float, default=0.6, help='Valor de threshold')
+parser.add_argument('--data_use', type=str, default='train+valid', choices=['train', 'valid', 'train+valid', 'test'], help='Dados rotulados que serão utilizado na busca do auto threshold')
+parser.add_argument('--join_sample', action='store_true', help='Utilizar amostra dos dados rotulados para auto threshold')
+parser.add_argument('--sample', type=float, default=1, help='Valor da amostra 1=100%')
 parser.add_argument('--index', type=str, default='IndexFlatIP', choices=['IndexFlatIP', 'HNSW', 'PairsInTestOnly'], help='Índice de similaridade')
 parser.add_argument('--show_metrics', action='store_true', help='Exibir métricas')
+parser.add_argument('--save_log_metrics', action='store_true', help='Salvar log e métricas')
 parser.add_argument('--save_result', action='store_true', help='Salvar resultado final')
 
 # Parse dos argumentos
@@ -1192,10 +1281,14 @@ load_save_vectors = args.load_save_vectors
 
 # 3. JUNÇÃO
 perform_join = args.perform_join
-auto_threshold = args.auto_threshold
 threshold = args.threshold
+auto_threshold = args.auto_threshold
+data_use = args.data_use
+join_sample = args.join_sample
+sample = args.sample
 index = args.index
 show_metrics = args.show_metrics
+save_log_metrics = args.save_log_metrics
 save_result = args.save_result
 
 log.append('- dataset: '+collection +' '+ type_dataset +' '+dataset)
@@ -1536,24 +1629,49 @@ if perform_join:
   log_result.append('---- Informações da junção ----')
 
   if auto_threshold:
+    match data_use:
+      case 'train':
+        dfDataUse = dfTrain
+      case 'valid':
+        dfDataUse = dfValid
+      case 'test':
+        dfDataUse = dfTest
+      case 'train+valid':
+        dfDataUse = pd.concat([dfTrain, dfValid], ignore_index=True)
+      case _:
+        raise ValueError(f"Invalid value for dataUse: {data_use}")
     print('-> Determinando melhor threshold')
+    log_result.append('Auto-treshold ativado!')
+    print('Junção em amostra: ',join_sample)
     start = time.time()
     if index == 'PairsInTestOnly':
       if collection == 'deepmatcher' or collection == 'sparkly-all':
-        resultados,timeJoin = join_test_two_tables(dfTest,vetoresA,vetoresB,threshold)
-        threshold, best_f1 = find_best_threshold_two_tables(resultados,dfTest)
+        resultados,timeJoin = join_test_two_tables(dfDataUse,vetoresA,vetoresB,dfIdsA,dfIdsB,threshold,sample)
+        threshold, best_f1 = find_best_threshold_two_tables(resultados,dfDataUse)
       else:
-        resultados,timeJoin = join_test_one_table(dfTest,vetores,dfIds,threshold)
-        threshold, best_f1 = find_best_threshold_auto_join_test(resultados,dfTest)
+        resultados,timeJoin = join_test_one_table(dfDataUse,vetores,dfIds,threshold)
+        threshold, best_f1 = find_best_threshold_auto_join_test(resultados,dfDataUse)
     else:
-      if collection == 'deepmatcher' or collection == 'sparkly-all':
-        resultados,timeIndex,timeJoin = join_tables(vetoresA,vetoresB,dfIdsA,dfIdsB,index,threshold)
-        threshold, best_f1 = find_best_threshold_two_tables(resultados,dfTest)
+      if join_sample:
+        log_result.append('- Tamanho da amostra para auto-threshold: ' + str(sample))
+        if collection == 'deepmatcher' or collection == 'sparkly-all':
+          resultados,timeIndex,timeJoin = join_tables_sample(vetoresA,vetoresB,dfIdsA,dfIdsB,index,threshold,sample,dfDataUse)
+          threshold, best_f1 = find_best_threshold_two_tables(resultados,dfDataUse)
+        else:
+          print('Not implemented')
       else:
-        resultados,timeIndex,timeJoin = auto_join(vetores,dfIds,index,threshold)
-        threshold, best_f1 = find_best_threshold_auto_join(resultados,dfIds)
+        if collection == 'deepmatcher' or collection == 'sparkly-all':
+          resultados,timeIndex,timeJoin = join_tables(vetoresA,vetoresB,dfIdsA,dfIdsB,index,threshold)
+          threshold, best_f1 = find_best_threshold_two_tables(resultados,dfDataUse)
+        else:
+          resultados,timeIndex,timeJoin = auto_join(vetores,dfIds,index,threshold)
+          threshold, best_f1 = find_best_threshold_auto_join(resultados,dfIds)
+
     end = time.time()
-    print('Threshold definido:',threshold,' - Tempo para busca do threshold: %2.fms' %((end-start)*1000))
+    log_result.append('Threshold definido: ' + str(threshold) +' - Tempo para busca do threshold: %2.fms' %((end-start)*1000))
+    #print('Threshold definido:',threshold,' - Tempo para busca do threshold: %2.fms' %((end-start)*1000))
+    if join_sample:
+      print('Tamanho da Amostra: ',sample)
   print('-> Iniciando operação de junção')
   log_result.append('Modelo: '+str(model_pre.replace("/", "-")))
   log_result.append('Modelo com fine-tuning: '+is_model_tuned)
@@ -1597,19 +1715,29 @@ if perform_join:
     print(log_metrics)
     log_result += "\n-- Métricas ---\n"
     log_result += log_metrics
+    f1score = float(re.search(r"F1-Score: (\d+\.\d+)", log_metrics).group(1))
 
+  if save_log_metrics:
+    print('-> Salvando log da junção e métricas em arquivo...')
+    dir_path = path_full + 'result_joins/'+ str(model_pre.replace("/", "-")) + '/' + 'ft_' + str(is_model_tuned) +'/'
+    if not os.path.isdir(dir_path):
+      os.makedirs(dir_path)
+    if join_sample:
+      url_file_log = dir_path + str(index) + '_sample' + str(join_sample) + '-' + str(data_use) + '_' + str(sample) + '_ths' + str(threshold) + '_f1score' + str(f1score) + '_log.txt'
+    else:
+      url_file_log = dir_path + str(index) + '_sample' + str(join_sample) + '_ths' + str(threshold) + '_f1score' + f1score + '_log.txt'
+    with open(url_file_log, 'w', encoding='utf-8') as f:
+      f.write(log_result.encode('utf-8').decode('utf-8'))
+    print('-> Log da junção salvo em',url_file_log)
+    
   if save_result:
     print('-> Salvando resultado da junção em arquivo...')
     dir_path = path_full + 'result_joins/'+ str(model_pre.replace("/", "-")) + '/' + 'ft_' + str(is_model_tuned) +'/'
     if not os.path.isdir(dir_path):
       os.makedirs(dir_path)
     url_file_result = dir_path + str(index) + '_' + str(threshold) + '_result.csv'
-    url_file_log = dir_path + str(index) + '_' + str(threshold) + '_log.txt'
     dfR = pd.DataFrame(resultados)
     dfR.to_csv(url_file_result, header=False, index=False)
-
-    with open(url_file_log, 'w', encoding='utf-8') as f:
-      f.write(log_result.encode('utf-8').decode('utf-8'))
     print('-> Resultado salvo em',url_file_result)
     print('-> Log da junção salvo no mesmo diretório')
 
